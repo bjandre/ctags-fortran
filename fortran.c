@@ -13,20 +13,20 @@
 /*
 *   INCLUDE FILES
 */
-#include "general.h"  /* must always come first */
+#include "general.h"	/* must always come first */
 
 #include <string.h>
 #include <limits.h>
-#include <ctype.h>  /* to define tolower () */
+#include <ctype.h>	/* to define tolower () */
 #include <setjmp.h>
+#include <mio/mio.h>
 
-#include "debug.h"
 #include "entry.h"
 #include "keyword.h"
+#include "main.h"
 #include "options.h"
 #include "parse.h"
 #include "read.h"
-#include "routines.h"
 #include "vstring.h"
 
 /*
@@ -84,7 +84,9 @@ typedef enum eKeywordId {
 	KEYWORD_end,
 	KEYWORD_entry,
 	KEYWORD_equivalence,
+	KEYWORD_extends,
 	KEYWORD_external,
+	KEYWORD_forall,
 	KEYWORD_format,
 	KEYWORD_function,
 	KEYWORD_if,
@@ -108,6 +110,7 @@ typedef enum eKeywordId {
 	KEYWORD_pointer,
 	KEYWORD_precision,
 	KEYWORD_private,
+	KEYWORD_procedure,
 	KEYWORD_program,
 	KEYWORD_public,
 	KEYWORD_pure,
@@ -191,29 +194,30 @@ typedef struct sTokenInfo {
 */
 
 static langType Lang_fortran;
+static langType Lang_f77;
 static jmp_buf Exception;
-static int Ungetc;
-static unsigned int Column;
-static boolean FreeSourceForm;
+static int Ungetc = '\0';
+static unsigned int Column = 0;
+static boolean FreeSourceForm = FALSE;
 static boolean ParsingString;
-static tokenInfo *Parent;
+static tokenInfo *Parent = NULL;
 
 /* indexed by tagType */
 static kindOption FortranKinds [] = {
-	{ TRUE,  'b', "block data", "block data"},
-	{ TRUE,  'c', "common",     "common blocks"},
-	{ TRUE,  'e', "entry",      "entry points"},
-	{ TRUE,  'f', "function",   "functions"},
-	{ FALSE, 'i', "interface",  "interface contents, generic names, and operators"},
-	{ TRUE,  'k', "component",  "type and structure components"},
-	{ TRUE,  'l', "label",      "labels"},
-	{ FALSE, 'L', "local",      "local, common block, and namelist variables"},
-	{ TRUE,  'm', "module",     "modules"},
-	{ TRUE,  'n', "namelist",   "namelists"},
-	{ TRUE,  'p', "program",    "programs"},
-	{ TRUE,  's', "subroutine", "subroutines"},
-	{ TRUE,  't', "type",       "derived types and structures"},
-	{ TRUE,  'v', "variable",   "program (global) and module variables"}
+	{ TRUE,  'b', "block data",	"block data"},
+	{ TRUE,  'c', "macro",		"common blocks"},
+	{ TRUE,  'e', "entry",		"entry points"},
+	{ TRUE,  'f', "function",	"functions"},
+	{ FALSE, 'i', "interface",	"interface contents, generic names, and operators"},
+	{ TRUE,  'k', "component",	"type and structure components"},
+	{ TRUE,  'l', "label",		"labels"},
+	{ FALSE, 'L', "local",		"local, common block, and namelist variables"},
+	{ TRUE,  'm', "namespace",	"modules"},
+	{ TRUE,  'n', "namelist",	"namelists"},
+	{ TRUE,  'p', "package",	"programs"},
+	{ TRUE,  's', "member",	"subroutines"},
+	{ TRUE,  't', "typedef",	"derived types and structures"},
+	{ TRUE,  'v', "variable",	"program (global) and module variables"}
 };
 
 /* For efinitions of Fortran 77 with extensions:
@@ -247,7 +251,9 @@ static const keywordDesc FortranKeywordTable [] = {
 	{ "end",            KEYWORD_end          },
 	{ "entry",          KEYWORD_entry        },
 	{ "equivalence",    KEYWORD_equivalence  },
+	{ "extends",        KEYWORD_extends      },
 	{ "external",       KEYWORD_external     },
+	{ "forall",         KEYWORD_forall       },
 	{ "format",         KEYWORD_format       },
 	{ "function",       KEYWORD_function     },
 	{ "if",             KEYWORD_if           },
@@ -271,6 +277,7 @@ static const keywordDesc FortranKeywordTable [] = {
 	{ "pointer",        KEYWORD_pointer      },
 	{ "precision",      KEYWORD_precision    },
 	{ "private",        KEYWORD_private      },
+	{ "procedure",      KEYWORD_procedure    },
 	{ "program",        KEYWORD_program      },
 	{ "public",         KEYWORD_public       },
 	{ "pure",           KEYWORD_pure         },
@@ -394,7 +401,7 @@ static boolean insideInterface (void)
 	return result;
 }
 
-static void buildFortranKeywordHash (void)
+static void buildFortranKeywordHash (const langType language)
 {
 	const size_t count =
 			sizeof (FortranKeywordTable) / sizeof (FortranKeywordTable [0]);
@@ -402,7 +409,7 @@ static void buildFortranKeywordHash (void)
 	for (i = 0  ;  i < count  ;  ++i)
 	{
 		const keywordDesc* const p = &FortranKeywordTable [i];
-		addKeyword (p->name, Lang_fortran, (int) p->id);
+		addKeyword (p->name, language, (int) p->id);
 	}
 }
 
@@ -893,6 +900,23 @@ static void checkForLabel (void)
 	ungetChar (c);
 }
 
+/*  Analyzes the identifier contained in a statement described by the
+ *  statement structure and adjusts the structure according the significance
+ *  of the identifier.
+ */
+static keywordId analyzeToken (vString *const name, langType language)
+{
+    static vString *keyword = NULL;
+    keywordId id;
+
+    if (keyword == NULL)
+	keyword = vStringNew ();
+    vStringCopyToLower (keyword, name);
+    id = (keywordId) lookupKeyword (vStringValue (keyword), language);
+
+    return id;
+}
+
 static void readIdentifier (tokenInfo *const token, const int c)
 {
 	parseIdentifier (token->string, c);
@@ -933,7 +957,7 @@ getNextChar:
 	c = getChar ();
 
 	token->lineNumber	= getSourceLineNumber ();
-	token->filePosition	= getInputFilePosition ();
+	token->filePosition = getInputFilePosition ();
 
 	switch (c)
 	{
@@ -1105,6 +1129,7 @@ static boolean isTypeSpec (tokenInfo *const token)
 		case KEYWORD_logical:
 		case KEYWORD_record:
 		case KEYWORD_type:
+		case KEYWORD_procedure:
 			result = TRUE;
 			break;
 		default:
@@ -1167,6 +1192,7 @@ static void parseTypeSpec (tokenInfo *const token)
 		case KEYWORD_integer:
 		case KEYWORD_logical:
 		case KEYWORD_real:
+		case KEYWORD_procedure:
 			readToken (token);
 			if (isType (token, TOKEN_PAREN_OPEN))
 				skipOverParens (token);  /* skip kind-selector */
@@ -1266,6 +1292,7 @@ static void parseQualifierSpecList (tokenInfo *const token)
 				break;
 
 			case KEYWORD_dimension:
+			case KEYWORD_extends:
 			case KEYWORD_intent:
 				readToken (token);
 				skipOverParens (token);
@@ -1588,6 +1615,7 @@ static boolean parseSpecificationStmt (tokenInfo *const token)
 		case KEYWORD_data:
 		case KEYWORD_dimension:
 		case KEYWORD_equivalence:
+		case KEYWORD_extends:
 		case KEYWORD_external:
 		case KEYWORD_intent:
 		case KEYWORD_intrinsic:
@@ -2024,7 +2052,8 @@ static boolean parseExecutionPart (tokenInfo *const token)
 				if (isSecondaryKeyword (token, KEYWORD_do) ||
 					isSecondaryKeyword (token, KEYWORD_if) ||
 					isSecondaryKeyword (token, KEYWORD_select) ||
-					isSecondaryKeyword (token, KEYWORD_where))
+					isSecondaryKeyword (token, KEYWORD_where) ||
+					isSecondaryKeyword (token, KEYWORD_forall))
 				{
 					skipToNextStatement (token);
 					result = TRUE;
@@ -2170,28 +2199,51 @@ static boolean findFortranTags (const unsigned int passCount)
 	return retry;
 }
 
-static void initialize (const langType language)
+static void initializeFortran (const langType language)
 {
-	Lang_fortran = language;
-	buildFortranKeywordHash ();
+    Lang_fortran = language;
+    buildFortranKeywordHash (language);
+}
+
+static void initializeF77 (const langType language)
+{
+    Lang_f77 = language;
+    buildFortranKeywordHash (language);
 }
 
 extern parserDefinition* FortranParser (void)
 {
-	static const char *const extensions [] = {
-		"f", "for", "ftn", "f77", "f90", "f95",
+    static const char *const extensions [] = {
+	"f90", "f95", "f03",
 #ifndef CASE_INSENSITIVE_FILENAMES
-		"F", "FOR", "FTN", "F77", "F90", "F95",
+	"F90", "F95", "F03",
 #endif
-		NULL
-	};
-	parserDefinition* def = parserNew ("Fortran");
-	def->kinds      = FortranKinds;
-	def->kindCount  = KIND_COUNT (FortranKinds);
-	def->extensions = extensions;
-	def->parser2    = findFortranTags;
-	def->initialize = initialize;
-	return def;
+	NULL
+    };
+    parserDefinition* def = parserNew ("Fortran");
+    def->kinds      = FortranKinds;
+    def->kindCount  = KIND_COUNT (FortranKinds);
+    def->extensions = extensions;
+    def->parser2    = findFortranTags;
+    def->initialize = initializeFortran;
+    return def;
 }
 
+extern parserDefinition* F77Parser (void)
+{
+    static const char *const extensions [] = {
+	"f", "for", "ftn", "f77",
+#ifndef CASE_INSENSITIVE_FILENAMES
+	"F", "FOR", "FTN", "F77",
+#endif
+	NULL
+    };
+    parserDefinition* def = parserNew ("F77");
+    def->kinds      = FortranKinds;
+    def->kindCount  = KIND_COUNT (FortranKinds);
+    def->extensions = extensions;
+    def->parser2    = findFortranTags;
+    def->initialize = initializeF77;
+    return def;
+}
 /* vi:set tabstop=4 shiftwidth=4: */

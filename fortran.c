@@ -19,14 +19,15 @@
 #include <limits.h>
 #include <ctype.h>	/* to define tolower () */
 #include <setjmp.h>
-#include <mio/mio.h>
 
+#include "debug.h"
 #include "entry.h"
 #include "keyword.h"
 #include "main.h"
 #include "options.h"
 #include "parse.h"
 #include "read.h"
+#include "routines.h"
 #include "vstring.h"
 
 /*
@@ -900,6 +901,7 @@ static void checkForLabel (void)
 	ungetChar (c);
 }
 
+#ifdef USE_GEANY_ANALYZETOKEN
 /*  Analyzes the identifier contained in a statement described by the
  *  statement structure and adjusts the structure according the significance
  *  of the identifier.
@@ -916,6 +918,7 @@ static keywordId analyzeToken (vString *const name, langType language)
 
     return id;
 }
+#endif
 
 static void readIdentifier (tokenInfo *const token, const int c)
 {
